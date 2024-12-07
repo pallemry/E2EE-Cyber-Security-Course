@@ -49,7 +49,6 @@ class Client:
         self.identity_public = self.identity_private.public_key()
 
         # Pre-keys
-        # Generate multiple pre-keys for demonstration
         self.pre_keys_private = []
         self.pre_keys_public = []
         for _ in range(5):  # 5 pre-keys
@@ -57,14 +56,17 @@ class Client:
             self.pre_keys_private.append(pk_priv)
             self.pre_keys_public.append(pk_priv.public_key())
 
-        # Store known identity keys of others: {client_id: X25519PublicKey}
+        # Known identity keys of others: {client_id: X25519PublicKey}
         self.known_identities = {}
+        # Store fetched keys for sending messages without re-fetching:
+        # {client_id: {"B_identity_pub": ..., "B_one_time_pub": ...}}
+        self.contact_pre_keys = {}
 
     def request_otp(self):
         req = {"type":"REQUEST_OTP","client_id":self.client_id}
         send_msg(self.sock, req)
         resp = recv_msg(self.sock)
-        if resp and resp["status"] == "otp_provided":
+        if resp and resp.get("status") == "otp_provided":
             self.otp = bytes.fromhex(resp["otp_hex"])
             print(f"[*] OTP received via secure channel: {resp['otp_hex']}")
         else:
@@ -77,7 +79,7 @@ class Client:
         req = {"type":"FETCH_SERVER_KEY","client_id":self.client_id}
         send_msg(self.sock, req)
         resp = recv_msg(self.sock)
-        if resp and resp["type"] == "SERVER_KEY_RESPONSE":
+        if resp and resp.get("type") == "SERVER_KEY_RESPONSE":
             server_pub_hex = resp["server_long_term_pub"]
             mac_hex = resp["mac_hex"]
             mac_check = hmac.new(self.otp, server_pub_hex.encode('utf-8'), hashlib.sha256).digest()
@@ -106,7 +108,7 @@ class Client:
 
         send_msg(self.sock, to_mac)
         resp = recv_msg(self.sock)
-        if resp and resp["type"] == "REGISTER_RESPONSE":
+        if resp and resp.get("type") == "REGISTER_RESPONSE":
             # verify MAC
             resp_no_mac = {
                 "type":"REGISTER_RESPONSE",
@@ -136,7 +138,6 @@ class Client:
             "identity_pub": identity_pub_hex,
             "pre_keys": pre_keys_hex
         }
-        # Normally this would be encrypted with session_key; omitted for brevity
         send_msg(self.sock, req)
         resp = recv_msg(self.sock)
         print("Finalize registration response:", resp)
@@ -145,23 +146,40 @@ class Client:
         req = {"type":"FETCH_KEYS","client_id":self.client_id,"target_id":target_id}
         send_msg(self.sock, req)
         resp = recv_msg(self.sock)
-        if resp and resp["status"] == "ok":
-            # Store the target's identity pub for future decryptions
+        if resp and resp.get("status") == "ok":
+            # Store the target's identity pub
             B_id_pub = x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(resp["B_identity_pub"]))
             self.known_identities[target_id] = B_id_pub
+            # Store keys for sending
+            self.contact_pre_keys[target_id] = {
+                "B_identity_pub": resp["B_identity_pub"],
+                "B_one_time_pub": resp["B_one_time_pub"]
+            }
+            print(f"[*] Keys for {target_id} fetched and stored.")
             return resp
         else:
             print("Error fetching keys:", resp)
             return None
 
-    def send_message(self, recipient_id, plaintext, B_identity_pub_hex, B_one_time_pub_hex):
+    def send_message(self, recipient_id, plaintext):
+        # Use stored keys
+        if recipient_id not in self.contact_pre_keys:
+            print(f"Don't have keys for {recipient_id}, run fetch_keys {recipient_id} first.")
+            return
+        B_identity_pub_hex = self.contact_pre_keys[recipient_id]["B_identity_pub"]
+        B_one_time_pub_hex = self.contact_pre_keys[recipient_id]["B_one_time_pub"]
+
         B_identity_pub = x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(B_identity_pub_hex))
         B_one_time_pub = x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(B_one_time_pub_hex))
 
         A_msg_eph_priv = x25519.X25519PrivateKey.generate()
         A_msg_eph_pub = A_msg_eph_priv.public_key()
 
-        # Triple/Quad DH
+        # Sender (A) does:
+        # dh1 = A_id_priv x B_id_pub
+        # dh2 = A_id_priv x B_one_time_pub
+        # dh3 = A_msg_eph_priv x B_id_pub
+        # dh4 = A_msg_eph_priv x B_one_time_pub
         dh1 = self.identity_private.exchange(B_identity_pub)
         dh2 = self.identity_private.exchange(B_one_time_pub)
         dh3 = A_msg_eph_priv.exchange(B_identity_pub)
@@ -191,7 +209,9 @@ class Client:
         req = {"type":"RETRIEVE_MESSAGES","client_id":self.client_id}
         send_msg(self.sock, req)
         resp = recv_msg(self.sock)
-        if resp and resp["status"] == "ok":
+        if resp and resp.get("status") == "ok":
+            if not resp["messages"]:
+                print("No new messages.")
             for msg in resp["messages"]:
                 self.decrypt_message(msg)
         else:
@@ -203,31 +223,35 @@ class Client:
         iv = bytes.fromhex(msg["iv"])
         ciphertext = bytes.fromhex(msg["ciphertext"])
 
-        # We must have stored the sender's identity pub when we fetched keys
         if sender_id not in self.known_identities:
             print(f"Don't know identity key for {sender_id}, cannot decrypt.")
+            print(f"Run: fetch_keys {sender_id}, then recv again.")
             return
+
         sender_identity_pub = self.known_identities[sender_id]
+        B_one_time_priv = self.pre_keys_private[0]  # Assuming key_id="0"
 
-        # Find the used one-time key. We assume key_id="0" means the first one used.
-        # Since the sender used one of our pre-keys, we must know which one.
-        # For simplicity, we assume it's the first pre-key we uploaded.
-        # In a real scenario, the server would let us know which one-time key id was used. 
-        # We are using "0" as a hardcoded id, so we use pre_keys_private[0].
-        B_one_time_priv = self.pre_keys_private[0]
+        # Receiver (B) should do:
+        # dh1 = B_id_priv x A_id_pub
+        # dh2 = B_one_time_priv x A_id_pub
+        # dh3 = B_id_priv x A_msg_eph_pub
+        # dh4 = B_one_time_priv x A_msg_eph_pub
 
-        # Derive shared key again
-        dh1 = B_one_time_priv.exchange(sender_identity_pub)   # B_one_time_priv w/ A_id_pub (SENDER)
-        dh2 = self.identity_private.exchange(A_ephemeral_pub) # B_id_priv w/ A_eph_pub
-        dh3 = B_one_time_priv.exchange(A_ephemeral_pub)       # B_one_time_priv w/ A_eph_pub
-        dh4 = self.identity_private.exchange(sender_identity_pub) # B_id_priv w/ A_id_pub
+        try:
+            dh1 = self.identity_private.exchange(sender_identity_pub)
+            dh2 = B_one_time_priv.exchange(sender_identity_pub)
+            dh3 = self.identity_private.exchange(A_ephemeral_pub)
+            dh4 = B_one_time_priv.exchange(A_ephemeral_pub)
 
-        master_secret = dh1 + dh2 + dh3 + dh4
-        shared_key = hkdf_derive(master_secret, None, b"E2EE Client-to-Client MsgKey")
+            master_secret = dh1 + dh2 + dh3 + dh4
+            shared_key = hkdf_derive(master_secret, None, b"E2EE Client-to-Client MsgKey")
 
-        aesgcm = AESGCM(shared_key)
-        plaintext = aesgcm.decrypt(iv, ciphertext, None)
-        print(f"[{sender_id} -> {self.client_id}] Decrypted message: {plaintext.decode('utf-8')}")
+            aesgcm = AESGCM(shared_key)
+            plaintext = aesgcm.decrypt(iv, ciphertext, None)
+            print(f"[{sender_id} -> {self.client_id}] Decrypted message: {plaintext.decode('utf-8')}")
+        except Exception as e:
+            print("Failed to decrypt message. Possibly invalid keys or incorrect ECDH order.")
+            print("Error:", e)
 
 def main():
     if len(sys.argv) < 2:
@@ -243,11 +267,15 @@ def main():
     c.register_ephemeral_exchange()
     c.finalize_registration()
 
-    print("[*] Client setup complete. You can now run operations like fetch_keys, send_message, retrieve_messages.")
+    print("[*] Client setup complete.")
+    print("Commands:")
+    print("  fetch_keys <target_id>        - Fetch and store target's identity and one-time keys")
+    print("  send <target_id> <message>    - Send encrypted message to target")
+    print("  recv                          - Retrieve and decrypt messages")
+    print("  quit                          - Exit")
 
-    # Simple interactive loop:
     while True:
-        cmd = input("Enter command (fetch_keys <target>, send <target> <message>, recv, quit): ").strip()
+        cmd = input("Enter command: ").strip()
         if cmd == "quit":
             break
         parts = cmd.split(" ", 2)
@@ -263,14 +291,7 @@ def main():
                 continue
             target_id = parts[1]
             message = parts[2].encode('utf-8')
-
-            # We need B_identity_pub and B_one_time_pub from earlier fetch_keys call
-            # Let's assume we have them stored from last fetch_keys call.
-            # In a real scenario, the client should store the response of fetch_keys
-            # For demo, let's just call fetch_keys again to get fresh keys:
-            resp = c.fetch_keys(target_id)
-            if resp and resp["status"] == "ok":
-                c.send_message(target_id, message, resp["B_identity_pub"], resp["B_one_time_pub"])
+            c.send_message(target_id, message)
         elif parts[0] == "recv":
             c.retrieve_messages()
         else:
