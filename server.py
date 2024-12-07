@@ -8,6 +8,7 @@ import hashlib
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 HOST = '127.0.0.1'
 PORT = 5000
@@ -79,7 +80,7 @@ def process_request(request):
 
         response = {
             "type":"SERVER_KEY_RESPONSE",
-            "server_long_term_pub": server_long_term_public.public_bytes().hex()
+            "server_long_term_pub": server_long_term_public.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
         }
         mac = hmac.new(otp, response["server_long_term_pub"].encode('utf-8'), hashlib.sha256).digest()
         response["mac_hex"] = mac.hex()
@@ -116,7 +117,7 @@ def process_request(request):
         # Respond with server_eph_pub and MAC
         resp = {
             "type":"REGISTER_RESPONSE",
-            "server_eph_pub": server_eph_pub.public_bytes().hex()
+            "server_eph_pub": server_eph_pub.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
         }
         mac_resp = hmac.new(otp, json.dumps(resp).encode('utf-8'), hashlib.sha256).digest()
         resp["mac_hex"] = mac_resp.hex()
@@ -153,8 +154,8 @@ def process_request(request):
 
         return {
             "status":"ok",
-            "B_identity_pub": identity_pub.public_bytes().hex(),
-            "B_one_time_pub": chosen_pre_key.public_bytes().hex(),
+            "B_identity_pub": identity_pub.public_bytes(Encoding.Raw, PublicFormat.Raw).hex(),
+            "B_one_time_pub": chosen_pre_key.public_bytes(Encoding.Raw, PublicFormat.Raw).hex(),
             "one_time_key_id":"0"
         }
 

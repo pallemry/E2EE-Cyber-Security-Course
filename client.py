@@ -8,6 +8,7 @@ from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 HOST = '127.0.0.1'
 PORT = 5000
@@ -70,6 +71,9 @@ class Client:
             print("Error requesting OTP:", resp)
 
     def fetch_server_key(self):
+        if not self.otp:
+            print("Cannot fetch server key without OTP.")
+            sys.exit(1)
         req = {"type":"FETCH_SERVER_KEY","client_id":self.client_id}
         send_msg(self.sock, req)
         resp = recv_msg(self.sock)
@@ -86,9 +90,12 @@ class Client:
             print("Error fetching server key:", resp)
 
     def register_ephemeral_exchange(self):
+        if not self.otp or not self.server_long_term_pub:
+            print("Cannot register without OTP or server public key.")
+            sys.exit(1)
         # Ephemeral exchange
         C_eph_priv = x25519.X25519PrivateKey.generate()
-        C_eph_pub_hex = C_eph_priv.public_key().public_bytes().hex()
+        C_eph_pub_hex = C_eph_priv.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
         to_mac = {
             "type":"REGISTER",
             "client_id":self.client_id,
@@ -120,8 +127,8 @@ class Client:
 
     def finalize_registration(self):
         # Send identity and pre-keys
-        identity_pub_hex = self.identity_public.public_bytes().hex()
-        pre_keys_hex = [k.public_bytes().hex() for k in self.pre_keys_public]
+        identity_pub_hex = self.identity_public.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+        pre_keys_hex = [k.public_bytes(Encoding.Raw, PublicFormat.Raw).hex() for k in self.pre_keys_public]
 
         req = {
             "type":"FINALIZE_REGISTRATION",
@@ -171,7 +178,7 @@ class Client:
             "type":"SEND_MESSAGE",
             "sender_id": self.client_id,
             "recipient_id": recipient_id,
-            "A_ephemeral_pub": A_msg_eph_pub.public_bytes().hex(),
+            "A_ephemeral_pub": A_msg_eph_pub.public_bytes(Encoding.Raw, PublicFormat.Raw).hex(),
             "B_one_time_key_id": "0",
             "iv": iv.hex(),
             "ciphertext": ciphertext.hex()
