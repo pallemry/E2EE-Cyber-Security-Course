@@ -6,6 +6,7 @@ import os
 import hmac
 import hashlib
 import random
+import time
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
@@ -22,7 +23,11 @@ server_long_term_public = server_long_term_private.public_key()
 
 registered_clients = {}
 stored_messages = {}
-client_otps = {}  # {client_id: otp_bytes}
+
+# We'll store OTP as {client_id: {"otp": otp_bytes, "timestamp": float}}
+client_otps = {}
+
+OTP_LIFETIME = 120  # OTP valid for 120 seconds (2 minutes)
 
 def hkdf_derive(secret, salt, info=b"E2EE"):
     return HKDF(
@@ -46,6 +51,16 @@ def send_message(sock, msg):
     encoded = json.dumps(msg).encode('utf-8')
     sock.send(len(encoded).to_bytes(4, 'big') + encoded)
 
+def is_otp_valid(client_id):
+    """Check if the OTP for given client_id is still valid."""
+    data = client_otps.get(client_id)
+    if not data:
+        return False
+    if (time.time() - data["timestamp"]) > OTP_LIFETIME:
+        # OTP expired
+        return False
+    return True
+
 def process_request(request):
     req_type = request.get("type")
 
@@ -56,20 +71,24 @@ def process_request(request):
         otp_bytes = otp_str.encode('utf-8')
 
         with data_lock:
-            client_otps[client_id] = otp_bytes
+            client_otps[client_id] = {
+                "otp": otp_bytes,
+                "timestamp": time.time()
+            }
 
         # Simulate SendBySecureChannel - Just print on server side
         print(f"[SecureChannel]: OTP for {client_id} is {otp_str}")
 
-        # Return OTP as a numeric string (not hex)
         return {"status": "otp_provided", "otp": otp_str}
 
     elif req_type == "FETCH_SERVER_KEY":
         client_id = request["client_id"]
         with data_lock:
-            otp = client_otps.get(client_id)
-        if not otp:
-            return {"status":"error","error":"no_otp_for_client"}
+            otp_data = client_otps.get(client_id)
+        if not otp_data or not is_otp_valid(client_id):
+            return {"status":"error","error":"otp_expired_or_invalid"}
+
+        otp = otp_data["otp"]
 
         response = {
             "type":"SERVER_KEY_RESPONSE",
@@ -81,14 +100,17 @@ def process_request(request):
 
     elif req_type == "REGISTER":
         client_id = request["client_id"]
+        with data_lock:
+            otp_data = client_otps.get(client_id)
+        if not otp_data or not is_otp_valid(client_id):
+            return {"status":"error","error":"otp_expired_or_invalid"}
+
+        otp = otp_data["otp"]
+
         client_eph_pub_hex = request["client_eph_pub"]
         given_mac_hex = request["mac_hex"]
 
-        with data_lock:
-            otp = client_otps.get(client_id)
-        if not otp:
-            return {"status":"error","error":"no_otp_for_client"}
-
+        # Verify MAC over the request
         to_mac = {
             "type":"REGISTER",
             "client_id":client_id,
@@ -127,6 +149,9 @@ def process_request(request):
                 "pre_keys": pre_keys,
                 "delivered_updates": []
             }
+            # Once registration is finalized, remove OTP (no longer needed)
+            if client_id in client_otps:
+                del client_otps[client_id]
 
         return {"status":"ok"}
 

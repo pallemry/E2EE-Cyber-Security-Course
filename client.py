@@ -143,7 +143,7 @@ class Client:
         self.identity_public = self.identity_private.public_key()
         self.pre_keys_private = []
         self.pre_keys_public = []
-        for _ in range(5):
+        for _ in range(10):
             pk_priv = x25519.X25519PrivateKey.generate()
             self.pre_keys_private.append(pk_priv)
             self.pre_keys_public.append(pk_priv.public_key())
@@ -242,7 +242,7 @@ class Client:
 
         req = {
             "type":"FINALIZE_REGISTRATION",
-            "client_id":self.client_id,
+            "client_id": self.client_id,
             "identity_pub": identity_pub_hex,
             "pre_keys": pre_keys_hex
         }
