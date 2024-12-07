@@ -1,0 +1,30 @@
+{
+  "registered": true,
+  "otp": "857287",
+  "server_long_term_pub": "2fbba57ef0d731eff67e133b3894c502167913238431447cd5797d5ad5ef0e49",
+  "identity_private": "6089ea33e600b549b865aaab0bcb8fb0b4de25a2e10168c531c73f11390de777",
+  "pre_keys_private": [
+    "68b13948cbedac6ecd130618d0df0d928680afc3f248a275507265cd7eff3c5a",
+    "c0084ea0b5c93323bf01377027f2d303129e409c441b2636a125d445f1737359",
+    "70f61c2c14ed03b05fec1c1495fe8441f67d7c50535aa9ae7070340c7feea076",
+    "a89a84303aaafae369f27182ba6f0ad71651f9e9d3eb37e667b77668b373da62",
+    "507101b480359f9dc660ad69aba4edf4d767205063a105954e7df27210814154"
+  ],
+  "pre_keys_public": [
+    "a88caede2280cf520e0939984ada147db0fc3fa96acdd3b89aa72dab9aa23078",
+    "45a508862e026d3f298d7f3f08a37787ce49234240885c46ca02e9bc3bf20f37",
+    "823ef5bc973016eef08caaaa93a07f33a946cf0f9b688731fe9786a1cc829479",
+    "13185fe5da72c78675230fe186d108b742683a216db13050cadfd43db4726e69",
+    "7e5a83f31a7035df57301716a73845494df12e3aba2939037cd3eb24af021471"
+  ],
+  "known_identities": {
+    "1": "c8a35a3f1eeea5e0e671ede20fa2bf85cf10eef55b8047d873777d4bc3e72115"
+  },
+  "contact_pre_keys": {
+    "1": {
+      "B_identity_pub": "c8a35a3f1eeea5e0e671ede20fa2bf85cf10eef55b8047d873777d4bc3e72115",
+      "B_one_time_pub": "939dce9f517650647e609c4766820a209fcd24e1d624d4b2fa4643d2862d6d43"
+    }
+  },
+  "stored_undecrypted_msgs": []
+}
