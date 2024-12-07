@@ -1,0 +1,27 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch Server",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/server.py",
+            "console": "integratedTerminal",
+            "args": []
+        },
+        {
+            "name": "Launch Client",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/client.py",
+            "console": "integratedTerminal",
+            "args": []
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Launch Client and Server",
+            "configurations": ["Launch Server", "Launch Client"]
+        }
+    ]
+}
