@@ -21,11 +21,12 @@ def hkdf_derive(secret, salt, info=b"E2EE"):
         info=info
     ).derive(secret)
 
-def send_msg(sock, msg):
+def send_plain_msg(sock, msg):
+    # For requests before finalize_registration
     encoded = json.dumps(msg).encode('utf-8')
     sock.send(len(encoded).to_bytes(4, 'big') + encoded)
 
-def recv_msg(sock):
+def recv_plain_msg(sock):
     length_bytes = sock.recv(4)
     if not length_bytes:
         return None
@@ -34,6 +35,40 @@ def recv_msg(sock):
     if not data:
         return None
     return json.loads(data.decode('utf-8'))
+
+def send_encrypted_msg(sock, msg, session_key):
+    # Encrypt the entire message dict as JSON
+    plaintext = json.dumps(msg).encode('utf-8')
+    aesgcm = AESGCM(session_key)
+    iv = os.urandom(12)
+    ciphertext = aesgcm.encrypt(iv, plaintext, None)
+
+    # Send iv and ciphertext
+    # Format: length(4 bytes) + iv_len(1 byte) + iv + ciphertext
+    # Or simpler: {"iv":..., "ciphertext":...} as a JSON
+    enc_msg = {
+        "iv": iv.hex(),
+        "ciphertext": ciphertext.hex()
+    }
+    encoded = json.dumps(enc_msg).encode('utf-8')
+    sock.send(len(encoded).to_bytes(4, 'big') + encoded)
+
+def recv_encrypted_msg(sock, session_key):
+    length_bytes = sock.recv(4)
+    if not length_bytes:
+        return None
+    msg_len = int.from_bytes(length_bytes, 'big')
+    data = sock.recv(msg_len)
+    if not data:
+        return None
+
+    enc_msg = json.loads(data.decode('utf-8'))
+    iv = bytes.fromhex(enc_msg["iv"])
+    ciphertext = bytes.fromhex(enc_msg["ciphertext"])
+
+    aesgcm = AESGCM(session_key)
+    plaintext = aesgcm.decrypt(iv, ciphertext, None)
+    return json.loads(plaintext.decode('utf-8'))
 
 class Client:
     def __init__(self, client_id):
@@ -143,18 +178,28 @@ class Client:
         self.identity_public = self.identity_private.public_key()
         self.pre_keys_private = []
         self.pre_keys_public = []
+        # Now generating 10 as requested
         for _ in range(10):
             pk_priv = x25519.X25519PrivateKey.generate()
             self.pre_keys_private.append(pk_priv)
             self.pre_keys_public.append(pk_priv.public_key())
+
+    def _send_request(self, req):
+        # If not registered yet, or in initial steps, send plaintext
+        # Once finalized (registered == True and session_key not None), send encrypted
+        if self.registered and self.session_key:
+            send_encrypted_msg(self.sock, req, self.session_key)
+            return recv_encrypted_msg(self.sock, self.session_key)
+        else:
+            send_plain_msg(self.sock, req)
+            return recv_plain_msg(self.sock)
 
     def request_otp(self):
         if self.registered:
             print("Already registered. No need to request OTP again.")
             return
         req = {"type":"REQUEST_OTP","client_id":self.client_id}
-        send_msg(self.sock, req)
-        resp = recv_msg(self.sock)
+        resp = self._send_request(req)
         if resp and resp.get("status") == "otp_provided":
             self.otp = resp["otp"].encode('utf-8')
             print(f"[*] OTP received via secure channel: {resp['otp']}")
@@ -170,8 +215,7 @@ class Client:
             print("Cannot fetch server key without OTP.")
             return
         req = {"type":"FETCH_SERVER_KEY","client_id":self.client_id}
-        send_msg(self.sock, req)
-        resp = recv_msg(self.sock)
+        resp = self._send_request(req)
         if resp and resp.get("type") == "SERVER_KEY_RESPONSE":
             server_pub_hex = resp["server_long_term_pub"]
             mac_hex = resp["mac_hex"]
@@ -193,7 +237,6 @@ class Client:
             print("Cannot register without OTP or server public key.")
             return
 
-        # Sanity check identity keys
         if self.identity_private is None or self.identity_public is None:
             print("Error: No identity keys available.")
             return
@@ -208,8 +251,7 @@ class Client:
         mac = hmac.new(self.otp, json.dumps(to_mac).encode('utf-8'), hashlib.sha256).digest()
         to_mac["mac_hex"] = mac.hex()
 
-        send_msg(self.sock, to_mac)
-        resp = recv_msg(self.sock)
+        resp = self._send_request(to_mac)
         if resp and resp.get("type") == "REGISTER_RESPONSE":
             resp_no_mac = {
                 "type":"REGISTER_RESPONSE",
@@ -246,10 +288,12 @@ class Client:
             "identity_pub": identity_pub_hex,
             "pre_keys": pre_keys_hex
         }
-        send_msg(self.sock, req)
-        resp = recv_msg(self.sock)
+        # Still plaintext because we finalize the session here
+        send_plain_msg(self.sock, req)
+        resp = recv_encrypted_msg(self.sock, self.session_key)
         if resp and resp.get("status") == "ok":
             self.registered = True
+            # Now subsequent requests will use session_key encryption
             print("Finalize registration response:", resp)
             self._save_state()
         else:
@@ -257,8 +301,7 @@ class Client:
 
     def fetch_keys(self, target_id):
         req = {"type":"FETCH_KEYS","client_id":self.client_id,"target_id":target_id}
-        send_msg(self.sock, req)
-        resp = recv_msg(self.sock)
+        resp = self._send_request(req)
         if resp and resp.get("status") == "ok":
             B_id_pub_hex = resp["B_identity_pub"]
             B_id_pub = x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(B_id_pub_hex))
@@ -276,7 +319,14 @@ class Client:
 
     def send_message(self, recipient_id, plaintext):
         if recipient_id not in self.contact_pre_keys:
-            print(f"Don't have keys for {recipient_id}, run fetch_keys {recipient_id} first.")
+            # Attempt to fetch keys if not already known using fetch_keys
+            print(f"Don't have keys for {recipient_id}, running fetch_keys {recipient_id}...")
+            success = self.fetch_keys(recipient_id)
+            if not success:
+                print(f"Failed to fetch keys for {recipient_id}, cannot send message.")
+            else:
+                print(f"Keys fetched for {recipient_id}, retrying message send.")
+                self.send_message(recipient_id, plaintext)
             return
 
         if self.identity_private is None:
@@ -313,19 +363,16 @@ class Client:
             "iv": iv.hex(),
             "ciphertext": ciphertext.hex()
         }
-        send_msg(self.sock, req)
-        resp = recv_msg(self.sock)
+        resp = self._send_request(req)
         print("Send message response:", resp)
 
     def retrieve_messages(self):
         req = {"type":"RETRIEVE_MESSAGES","client_id":self.client_id}
-        send_msg(self.sock, req)
-        resp = recv_msg(self.sock)
+        resp = self._send_request(req)
         if resp and resp.get("status") == "ok":
             msgs = resp["messages"]
             if not msgs and not self.stored_undecrypted_msgs:
                 print("No new messages.")
-            # Combine newly retrieved with previously stored
             all_msgs = msgs + self.stored_undecrypted_msgs
             self.stored_undecrypted_msgs = []
             undecrypted = []
@@ -346,7 +393,6 @@ class Client:
                     print(f"Failed to fetch keys for {sender_id}, cannot decrypt message now.")
                     second_round.append(msg)
                     continue
-            # Try decrypt again
             if not self.decrypt_message(msg):
                 print("Still failed to decrypt after fetching keys, storing locally.")
                 self.stored_undecrypted_msgs.append(msg)
