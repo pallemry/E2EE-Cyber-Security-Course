@@ -67,8 +67,8 @@ class Client:
         send_msg(self.sock, req)
         resp = recv_msg(self.sock)
         if resp and resp.get("status") == "otp_provided":
-            self.otp = bytes.fromhex(resp["otp_hex"])
-            print(f"[*] OTP received via secure channel: {resp['otp_hex']}")
+            self.otp = resp["otp"].encode('utf-8')
+            print(f"[*] OTP received via secure channel: {resp['otp']}")
         else:
             print("Error requesting OTP:", resp)
 

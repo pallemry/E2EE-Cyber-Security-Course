@@ -5,6 +5,7 @@ import uuid
 import os
 import hmac
 import hashlib
+import random
 from cryptography.hazmat.primitives.asymmetric import x25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
@@ -19,22 +20,9 @@ data_lock = threading.Lock()
 server_long_term_private = x25519.X25519PrivateKey.generate()
 server_long_term_public = server_long_term_private.public_key()
 
-# Client data structures:
-# registered_clients = {
-#   client_id: {
-#       "identity_pub": X25519PublicKey,
-#       "pre_keys": [X25519PublicKey,...],
-#       "delivered_updates": []
-#   }
-# }
 registered_clients = {}
-
-# stored_messages = {recipient_id: [(message_id, msg_data)]}
-# msg_data contains: sender_id, A_ephemeral_pub, B_one_time_key_id, iv, ciphertext
 stored_messages = {}
-
-# OTP tracking: {client_id: otp_bytes}
-client_otps = {}
+client_otps = {}  # {client_id: otp_bytes}
 
 def hkdf_derive(secret, salt, info=b"E2EE"):
     return HKDF(
@@ -63,16 +51,21 @@ def process_request(request):
 
     if req_type == "REQUEST_OTP":
         client_id = request["client_id"]
-        otp = os.urandom(16)  # 128-bit OTP
+        # Generate a 6-digit numeric OTP
+        otp_str = f"{random.randint(0,999999):06d}"
+        otp_bytes = otp_str.encode('utf-8')
+
         with data_lock:
-            client_otps[client_id] = otp
+            client_otps[client_id] = otp_bytes
+
         # Simulate SendBySecureChannel - Just print on server side
-        print(f"[SecureChannel]: OTP for {client_id} is {otp.hex()}")
-        return {"status":"otp_provided","otp_hex":otp.hex()}
+        print(f"[SecureChannel]: OTP for {client_id} is {otp_str}")
+
+        # Return OTP as a numeric string (not hex)
+        return {"status": "otp_provided", "otp": otp_str}
 
     elif req_type == "FETCH_SERVER_KEY":
         client_id = request["client_id"]
-        # The server returns its public key and a MAC with the OTP for authenticity
         with data_lock:
             otp = client_otps.get(client_id)
         if not otp:
@@ -96,7 +89,6 @@ def process_request(request):
         if not otp:
             return {"status":"error","error":"no_otp_for_client"}
 
-        # Verify MAC over the request
         to_mac = {
             "type":"REGISTER",
             "client_id":client_id,
@@ -110,11 +102,9 @@ def process_request(request):
         server_eph_priv = x25519.X25519PrivateKey.generate()
         server_eph_pub = server_eph_priv.public_key()
 
-        # Derive session key
         shared_secret = server_eph_priv.exchange(client_eph_pub)
-        session_key = hkdf_derive(shared_secret, otp)  # Not stored, just conceptual here
+        session_key = hkdf_derive(shared_secret, otp)  # conceptual
 
-        # Respond with server_eph_pub and MAC
         resp = {
             "type":"REGISTER_RESPONSE",
             "server_eph_pub": server_eph_pub.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
@@ -127,8 +117,6 @@ def process_request(request):
         client_id = request["client_id"]
         identity_pub_hex = request["identity_pub"]
         pre_keys_hex = request["pre_keys"]
-        # In a real scenario, we'd decrypt and verify this request with the session key from registration.
-        # Here we assume trust since we are at final step of registration.
 
         identity_pub = x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(identity_pub_hex))
         pre_keys = [x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(k)) for k in pre_keys_hex]
