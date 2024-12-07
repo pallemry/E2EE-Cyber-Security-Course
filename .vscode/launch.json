@@ -10,18 +10,26 @@
             "args": []
         },
         {
-            "name": "Launch Client",
+            "name": "Launch Client 1",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/client.py",
             "console": "integratedTerminal",
-            "args": []
+            "args": ["1"]
+        },
+        {
+            "name": "Launch Client 2",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/client.py",
+            "console": "integratedTerminal",
+            "args": ["2"]
         }
     ],
     "compounds": [
         {
             "name": "Launch Client and Server",
-            "configurations": ["Launch Server", "Launch Client"]
+            "configurations": ["Launch Server", "Launch Client 1", "Launch Client 2"]
         }
     ]
 }
