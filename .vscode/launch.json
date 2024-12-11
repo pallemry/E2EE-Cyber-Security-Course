@@ -15,7 +15,9 @@
             "request": "launch",
             "program": "${workspaceFolder}/client.py",
             "console": "integratedTerminal",
-            "args": ["1"]
+            "args": [
+                "1"
+            ]
         },
         {
             "name": "Launch Client 2",
@@ -23,13 +25,27 @@
             "request": "launch",
             "program": "${workspaceFolder}/client.py",
             "console": "integratedTerminal",
-            "args": ["2"]
+            "args": [
+                "2"
+            ]
+        },
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
         }
     ],
     "compounds": [
         {
             "name": "Launch Client and Server",
-            "configurations": ["Launch Server", "Launch Client 1", "Launch Client 2"]
+            "configurations": [
+                "Launch Server",
+                "Launch Client 1",
+                "Launch Client 2"
+            ],
+            "preLaunchTask": "closeTerminals"
         }
     ]
 }

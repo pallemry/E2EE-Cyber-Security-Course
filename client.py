@@ -4,7 +4,8 @@ import os
 import sys
 import hmac
 import hashlib
-from cryptography.hazmat.primitives.asymmetric import x25519
+from utils import *
+from cryptography.hazmat.primitives.asymmetric import x25519, ed25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -22,7 +23,6 @@ def hkdf_derive(secret, salt, info=b"E2EE"):
     ).derive(secret)
 
 def send_plain_msg(sock, msg):
-    # For requests before finalize_registration
     encoded = json.dumps(msg).encode('utf-8')
     sock.send(len(encoded).to_bytes(4, 'big') + encoded)
 
@@ -36,40 +36,6 @@ def recv_plain_msg(sock):
         return None
     return json.loads(data.decode('utf-8'))
 
-def send_encrypted_msg(sock, msg, session_key):
-    # Encrypt the entire message dict as JSON
-    plaintext = json.dumps(msg).encode('utf-8')
-    aesgcm = AESGCM(session_key)
-    iv = os.urandom(12)
-    ciphertext = aesgcm.encrypt(iv, plaintext, None)
-
-    # Send iv and ciphertext
-    # Format: length(4 bytes) + iv_len(1 byte) + iv + ciphertext
-    # Or simpler: {"iv":..., "ciphertext":...} as a JSON
-    enc_msg = {
-        "iv": iv.hex(),
-        "ciphertext": ciphertext.hex()
-    }
-    encoded = json.dumps(enc_msg).encode('utf-8')
-    sock.send(len(encoded).to_bytes(4, 'big') + encoded)
-
-def recv_encrypted_msg(sock, session_key):
-    length_bytes = sock.recv(4)
-    if not length_bytes:
-        return None
-    msg_len = int.from_bytes(length_bytes, 'big')
-    data = sock.recv(msg_len)
-    if not data:
-        return None
-
-    enc_msg = json.loads(data.decode('utf-8'))
-    iv = bytes.fromhex(enc_msg["iv"])
-    ciphertext = bytes.fromhex(enc_msg["ciphertext"])
-
-    aesgcm = AESGCM(session_key)
-    plaintext = aesgcm.decrypt(iv, ciphertext, None)
-    return json.loads(plaintext.decode('utf-8'))
-
 class Client:
     def __init__(self, client_id):
         self.client_id = client_id
@@ -77,10 +43,15 @@ class Client:
 
         self.otp = None
         self.server_long_term_pub = None
+        self.server_signing_public_key = None
+
         self.session_key = None
         self.registered = False
         self.identity_private = None
         self.identity_public = None
+        self.client_signing_private_key = None
+        self.client_signing_public_key = None
+
         self.pre_keys_private = []
         self.pre_keys_public = []
         self.known_identities = {}
@@ -88,9 +59,9 @@ class Client:
         self.stored_undecrypted_msgs = []
 
         self._load_state()
-        
+
         # Ensure keys are generated if not present
-        if self.identity_private is None or self.identity_public is None:
+        if self.identity_private is None or self.identity_public is None or self.client_signing_private_key is None:
             self._generate_new_identity_and_prekeys()
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -118,16 +89,42 @@ class Client:
             k: v.public_bytes(Encoding.Raw, PublicFormat.Raw).hex() for k, v in self.known_identities.items()
         }
 
+        signing_priv_hex = None
+        if self.client_signing_private_key is not None:
+            signing_priv_hex = self.client_signing_private_key.private_bytes(
+                Encoding.Raw, PrivateFormat.Raw, NoEncryption()
+            ).hex()
+
+        signing_pub_hex = None
+        if self.client_signing_public_key is not None:
+            signing_pub_hex = self.client_signing_public_key.public_bytes(
+                Encoding.Raw, PublicFormat.Raw
+            ).hex()
+
+        server_signing_pub_hex = None
+        if self.server_signing_public_key is not None:
+            server_signing_pub_hex = self.server_signing_public_key.public_bytes(
+                Encoding.Raw, PublicFormat.Raw
+            ).hex()
+            
+        session_key_hex = None
+        if self.session_key is not None:
+            session_key_hex = self.session_key.hex()
+
         state = {
             "registered": self.registered,
             "otp": self.otp.decode('utf-8') if self.otp else None,
             "server_long_term_pub": self.server_long_term_pub.public_bytes(Encoding.Raw, PublicFormat.Raw).hex() if self.server_long_term_pub else None,
+            "server_signing_public_key": server_signing_pub_hex,
             "identity_private": id_priv_hex,
+            "client_signing_private_key": signing_priv_hex,
+            "client_signing_public_key": signing_pub_hex,
             "pre_keys_private": pre_keys_private_hex,
             "pre_keys_public": pre_keys_public_hex,
             "known_identities": known_identities_hex,
             "contact_pre_keys": self.contact_pre_keys,
-            "stored_undecrypted_msgs": self.stored_undecrypted_msgs
+            "stored_undecrypted_msgs": self.stored_undecrypted_msgs,
+            "session_key": session_key_hex
         }
 
         with open(self.state_file, "w") as f:
@@ -147,10 +144,21 @@ class Client:
         if server_pub_hex:
             self.server_long_term_pub = x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(server_pub_hex))
 
+        server_signing_pub_hex = state.get("server_signing_public_key")
+        if server_signing_pub_hex:
+            self.server_signing_public_key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(server_signing_pub_hex))
+
         id_priv_hex = state.get("identity_private")
         if id_priv_hex:
             self.identity_private = x25519.X25519PrivateKey.from_private_bytes(bytes.fromhex(id_priv_hex))
             self.identity_public = self.identity_private.public_key()
+
+        client_signing_priv_hex = state.get("client_signing_private_key")
+        if client_signing_priv_hex:
+            self.client_signing_private_key = ed25519.Ed25519PrivateKey.from_private_bytes(bytes.fromhex(client_signing_priv_hex))
+        client_signing_pub_hex = state.get("client_signing_public_key")
+        if client_signing_pub_hex:
+            self.client_signing_public_key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(client_signing_pub_hex))
 
         pre_keys_private_hex = state.get("pre_keys_private", [])
         self.pre_keys_private = [
@@ -172,31 +180,39 @@ class Client:
 
         self.contact_pre_keys = state.get("contact_pre_keys", {})
         self.stored_undecrypted_msgs = state.get("stored_undecrypted_msgs", [])
+        
+        session_key_hex = state.get("session_key")
+        if session_key_hex:
+            self.session_key = bytes.fromhex(session_key_hex)
 
-    def _generate_new_identity_and_prekeys(self):
+    def _generate_new_identity_and_prekeys(self, num_pre_keys=10):
         self.identity_private = x25519.X25519PrivateKey.generate()
         self.identity_public = self.identity_private.public_key()
+        # Derive Ed25519 key from X25519 key
+        self.client_signing_private_key, self.client_signing_public_key = derive_ed25519_from_x25519(self.identity_private)
+        
         self.pre_keys_private = []
         self.pre_keys_public = []
-        # Now generating 10 as requested
-        for _ in range(10):
+        for _ in range(num_pre_keys):
             pk_priv = x25519.X25519PrivateKey.generate()
             self.pre_keys_private.append(pk_priv)
             self.pre_keys_public.append(pk_priv.public_key())
 
-    def _send_request(self, req):
-        # If not registered yet, or in initial steps, send plaintext
-        # Once finalized (registered == True and session_key not None), send encrypted
-        if self.registered and self.session_key:
-            send_encrypted_msg(self.sock, req, self.session_key)
-            return recv_encrypted_msg(self.sock, self.session_key)
+    def _send_request(self, req, signed=True):
+        if self.session_key:
+            if not self.server_signing_public_key and signed:
+                print("Error: Server signing key not known.")
+                return
+            # Use digital signature here
+            send_encrypted_msg(self.sock, req, self.session_key, self.client_signing_private_key if signed else None)
+            return recv_encrypted_msg(self.sock, self.session_key, self.server_signing_public_key if signed else None)
         else:
             send_plain_msg(self.sock, req)
             return recv_plain_msg(self.sock)
 
     def request_otp(self):
         if self.registered:
-            print("Already registered. No need to request OTP again.")
+            print("Already registered.")
             return
         req = {"type":"REQUEST_OTP","client_id":self.client_id}
         resp = self._send_request(req)
@@ -217,14 +233,25 @@ class Client:
         req = {"type":"FETCH_SERVER_KEY","client_id":self.client_id}
         resp = self._send_request(req)
         if resp and resp.get("type") == "SERVER_KEY_RESPONSE":
-            server_pub_hex = resp["server_long_term_pub"]
+            server_x25519_pub_hex = resp["server_long_term_pub"]
+            server_ed25519_pub_key_hex = resp["server_signing_pub"]
             mac_hex = resp["mac_hex"]
-            mac_check = hmac.new(self.otp, server_pub_hex.encode('utf-8'), hashlib.sha256).digest()
+
+            # Validate the MAC
+            mac_check = hmac.new(self.otp, server_x25519_pub_hex.encode('utf-8'), hashlib.sha256).digest()
             if not hmac.compare_digest(mac_check, bytes.fromhex(mac_hex)):
                 print("Server public key MAC verification failed!")
                 sys.exit(1)
-            self.server_long_term_pub = x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(server_pub_hex))
-            print("[*] Server public key verified.")
+
+            # Derive the Ed25519 public key from the X25519 public key
+            server_x25519_pub = x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(server_x25519_pub_hex))
+            # Verify the Ed25519 public key
+            server_ed25519_pub_key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(server_ed25519_pub_key_hex))
+
+            self.server_long_term_pub = server_x25519_pub
+            self.server_signing_public_key = server_ed25519_pub_key
+            print(f"[*] Server public key for signs: {server_ed25519_pub_key.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()}")
+            print("[*] Server public and signing keys derived and verified.")
             self._save_state()
         else:
             print("Error fetching server key:", resp)
@@ -250,8 +277,8 @@ class Client:
         }
         mac = hmac.new(self.otp, json.dumps(to_mac).encode('utf-8'), hashlib.sha256).digest()
         to_mac["mac_hex"] = mac.hex()
-
-        resp = self._send_request(to_mac)
+        
+        resp = self._send_request(to_mac, signed=False)
         if resp and resp.get("type") == "REGISTER_RESPONSE":
             resp_no_mac = {
                 "type":"REGISTER_RESPONSE",
@@ -278,19 +305,27 @@ class Client:
         if self.identity_public is None:
             print("Error: Identity public key not set.")
             return
+        
+        if not self.server_signing_public_key:
+            print("Error: Server signing public key not set.")
+            return
+        
+        if not self.client_signing_public_key:
+            print("Error: Client signing public key not set.")
+            return
 
         identity_pub_hex = self.identity_public.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
         pre_keys_hex = [k.public_bytes(Encoding.Raw, PublicFormat.Raw).hex() for k in self.pre_keys_public]
+        signing_pub_hex = self.client_signing_public_key.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
 
         req = {
             "type":"FINALIZE_REGISTRATION",
             "client_id": self.client_id,
             "identity_pub": identity_pub_hex,
-            "pre_keys": pre_keys_hex
+            "pre_keys": pre_keys_hex,
+            "signing_pub": signing_pub_hex
         }
-        # Still plaintext because we finalize the session here
-        send_plain_msg(self.sock, req)
-        resp = recv_encrypted_msg(self.sock, self.session_key)
+        resp = self._send_request(req, signed=False)
         if resp and resp.get("status") == "ok":
             self.registered = True
             # Now subsequent requests will use session_key encryption
@@ -435,6 +470,48 @@ class Client:
             print("Failed to decrypt message.", e)
             return False
 
+    def reconnect_with_server(self):
+        if not self.registered:
+            print("Client is not registered. Please register first.")
+            return
+
+        # Send a reconnection request
+        req = {
+            "type": "RECONNECT",
+            "client_id": self.client_id
+        }
+        send_plain_msg(self.sock, req)
+
+        # Expect a challenge from the server
+        resp = recv_plain_msg(self.sock)
+        if resp and resp.get("type") == "CHALLENGE" and self.session_key:
+            challenge = resp["challenge"]
+            print("Received challenge from server.")
+
+            # Compute the response using the session key or signing key
+            if self.client_signing_private_key:
+                challenge_response = self.client_signing_private_key.sign(challenge.encode('utf-8')).hex()
+            else:
+                # Fallback using HMAC with session key
+                challenge_response = hmac.new(self.session_key, challenge.encode('utf-8'), hashlib.sha256).hexdigest()
+
+            # Send the response back to the server
+            response = {
+                "type": "CHALLENGE_RESPONSE",
+                "client_id": self.client_id,
+                "challenge_response": challenge_response
+            }
+            
+            final_resp = self._send_request(response)
+            
+            if final_resp and final_resp.get("status") == "ok":
+                print("Reconnection successful.")
+            else:
+                print("Reconnection failed:", final_resp.get("error") if final_resp else "Unknown error")
+        else:
+            print("Unexpected response from server during reconnection.")
+
+
 def main():
     if len(sys.argv) < 2:
         client_id = input("Enter your phone number (client_id): ").strip()
@@ -442,6 +519,12 @@ def main():
         client_id = sys.argv[1]
 
     c = Client(client_id)
+    
+    if c.registered:
+        print("Client already registered, making connection with server")
+        # mechanishm to reconnect with server, if the client is already registered
+        c.reconnect_with_server()
+        
 
     print("Commands:")
     print("  register           - Run the full registration flow if not registered")
@@ -452,7 +535,7 @@ def main():
 
     try:
         while True:
-            cmd_line = input("Enter command: ").strip()
+            cmd_line = input("> ").strip()
             if not cmd_line:
                 continue
             cmd = cmd_line.split(" ", 2)

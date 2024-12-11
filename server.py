@@ -7,7 +7,8 @@ import hmac
 import hashlib
 import random
 import time
-from cryptography.hazmat.primitives.asymmetric import x25519
+from utils import *
+from cryptography.hazmat.primitives.asymmetric import x25519, ed25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
@@ -20,12 +21,15 @@ data_lock = threading.Lock()
 
 server_long_term_private = x25519.X25519PrivateKey.generate()
 server_long_term_public = server_long_term_private.public_key()
+server_signing_private_key, server_sigining_publick_key = derive_ed25519_from_x25519(server_long_term_private)
+print(f"Server public key for sign:", server_sigining_publick_key.public_bytes(Encoding.Raw, PublicFormat.Raw).hex())
 
 registered_clients = {}
 stored_messages = {}
 
 client_otps = {}
 session_keys = {}  # {client_id: session_key for encryption after finalize_registration}
+post_ephemeral = {}  # {client_id: True/False}
 
 OTP_LIFETIME = 120  # OTP valid for 120 seconds (2 minutes)
 
@@ -51,33 +55,6 @@ def send_plain_msg(sock, msg):
     encoded = json.dumps(msg).encode('utf-8')
     sock.send(len(encoded).to_bytes(4, 'big') + encoded)
 
-def recv_encrypted_msg(sock, session_key):
-    length_bytes = sock.recv(4)
-    if not length_bytes:
-        return None
-    msg_len = int.from_bytes(length_bytes, 'big')
-    data = sock.recv(msg_len)
-    if not data:
-        return None
-    enc_msg = json.loads(data.decode('utf-8'))
-    iv = bytes.fromhex(enc_msg["iv"])
-    ciphertext = bytes.fromhex(enc_msg["ciphertext"])
-    aesgcm = AESGCM(session_key)
-    plaintext = aesgcm.decrypt(iv, ciphertext, None)
-    return json.loads(plaintext.decode('utf-8'))
-
-def send_encrypted_msg(sock, msg, session_key):
-    plaintext = json.dumps(msg).encode('utf-8')
-    aesgcm = AESGCM(session_key)
-    iv = os.urandom(12)
-    ciphertext = aesgcm.encrypt(iv, plaintext, None)
-
-    enc_msg = {
-        "iv": iv.hex(),
-        "ciphertext": ciphertext.hex()
-    }
-    encoded = json.dumps(enc_msg).encode('utf-8')
-    sock.send(len(encoded).to_bytes(4, 'big') + encoded)
 
 def is_otp_valid(client_id):
     data = client_otps.get(client_id)
@@ -93,6 +70,51 @@ def process_request(req, client_id):
     # Requests before finalize_registration are plaintext:
     # REQUEST_OTP, FETCH_SERVER_KEY, REGISTER, FINALIZE_REGISTRATION
     # After that, requests should be encrypted if session_key exists.
+    if req_type == "RECONNECT":
+        if client_id not in registered_clients:
+            return {"status": "error", "error": "Unknown client ID"}, False
+
+        # Generate a challenge (random string or nonce)
+        challenge = os.urandom(16).hex()
+        with data_lock:
+            registered_clients[client_id]["challenge"] = challenge
+
+        print(f"Generated challenge for {client_id}")
+        return {"type": "CHALLENGE", "challenge": challenge}, False
+    
+    elif req_type == "CHALLENGE_RESPONSE":
+        if client_id not in registered_clients:
+            return {"status": "error", "error": "Unknown client ID"}, False
+
+        challenge = registered_clients[client_id].get("challenge")
+        if not challenge:
+            return {"status": "error", "error": "No active challenge for client"}, False
+
+        expected_signing_pub = registered_clients[client_id]["signing_pub"]
+        received_response = req.get("challenge_response")
+
+        try:
+            # Verify the response using the signing public key
+            if expected_signing_pub:
+                expected_signing_pub.verify(
+                    bytes.fromhex(received_response),
+                    challenge.encode('utf-8')
+                )
+            else:
+                # Fallback: Verify using session key and HMAC
+                expected_hmac = hmac.new(session_keys[client_id], challenge.encode('utf-8'), hashlib.sha256).hexdigest()
+                if received_response != expected_hmac:
+                    raise ValueError("Invalid HMAC response")
+
+            # Successful authentication
+            print(f"Client {client_id} reconnected successfully.")
+            del registered_clients[client_id]["challenge"]
+            return {"status": "ok"}, True
+
+        except Exception as e:
+            print(f"Failed challenge response verification for {client_id}: {e}")
+            return {"status": "error", "error": "Challenge response verification failed"}, False
+
 
     if req_type == "REQUEST_OTP":
         otp_str = f"{random.randint(0,999999):06d}"
@@ -113,13 +135,18 @@ def process_request(req, client_id):
         otp = otp_data["otp"]
         response = {
             "type":"SERVER_KEY_RESPONSE",
-            "server_long_term_pub": server_long_term_public.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+            "server_long_term_pub": server_long_term_public.public_bytes(Encoding.Raw, PublicFormat.Raw).hex(),
+            "server_signing_pub": server_sigining_publick_key.public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
         }
         mac = hmac.new(otp, response["server_long_term_pub"].encode('utf-8'), hashlib.sha256).digest()
         response["mac_hex"] = mac.hex()
         return response, False
 
     elif req_type == "REGISTER":
+        # handle registered clients
+        if client_id in registered_clients:
+            return {"status":"error","error":"already_registered"}, False
+        
         with data_lock:
             otp_data = client_otps.get(client_id)
         if not otp_data or not is_otp_valid(client_id):
@@ -149,6 +176,7 @@ def process_request(req, client_id):
         # Actually let's store it now, we trust the ephemeral step.
         with data_lock:
             session_keys[client_id] = session_key
+            post_ephemeral[client_id] = True
 
         resp = {
             "type":"REGISTER_RESPONSE",
@@ -161,15 +189,18 @@ def process_request(req, client_id):
     elif req_type == "FINALIZE_REGISTRATION":
         identity_pub_hex = req["identity_pub"]
         pre_keys_hex = req["pre_keys"]
+        signing_pub = req["signing_pub"]
 
         identity_pub = x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(identity_pub_hex))
         pre_keys = [x25519.X25519PublicKey.from_public_bytes(bytes.fromhex(k)) for k in pre_keys_hex]
+        client_signing_pub_key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(signing_pub))
 
         with data_lock:
             registered_clients[client_id] = {
                 "identity_pub": identity_pub,
                 "pre_keys": pre_keys,
-                "delivered_updates": []
+                "delivered_updates": [],
+                "signing_pub": client_signing_pub_key
             }
             if client_id in client_otps:
                 del client_otps[client_id]
@@ -257,16 +288,12 @@ def handle_client_connection(client_socket, client_address):
 
     try:
         while True:
-            # We need to know if we should decrypt or read plaintext
-            # If we have session_key and registered, read encrypted else plaintext
-            # But what if we don't know yet?
-            # We'll attempt plaintext first. If after finalize we must do encrypted.
-            # We'll store a flag: after finalize -> encrypted.
-
-            # Let's store a flag after finalize:
-            if client_id in registered_clients and client_id in session_keys:
-                # Encrypted phase
-                req = recv_encrypted_msg(client_socket, session_keys[client_id])
+            use_enc = client_id in post_ephemeral and client_id in session_keys and post_ephemeral[client_id]
+            client = registered_clients.get(client_id)
+            client_signing_pub = client.get("signing_pub") if client else None
+            if use_enc:
+                # Encrypted phase, need to verify signature using client's signing_pub
+                req = recv_encrypted_msg(client_socket, session_keys[client_id], client_signing_pub)
             else:
                 # Plaintext phase
                 req = recv_plain_msg(client_socket)
@@ -283,7 +310,8 @@ def handle_client_connection(client_socket, client_address):
             response, encrypt_response = process_request(req, client_id)
 
             if encrypt_response and client_id in session_keys:
-                send_encrypted_msg(client_socket, response, session_keys[client_id])
+                # We sign with server_signing_private_key and client verifies with server_signing_public_key
+                send_encrypted_msg(client_socket, response, session_keys[client_id], server_signing_private_key if client_signing_pub is not None else None)
             else:
                 send_plain_msg(client_socket, response)
 
