@@ -540,21 +540,20 @@ def main():
         if not is_valid_phone_number(client_id):
             print("Error: Invalid phone number provided via command line.")
             sys.exit(1)
-
+    print(f"Client ID: {client_id}")
     c = Client(client_id)
 
     if c.registered:
         print("Client already registered, making connection with server")
         # mechanishm to reconnect with server, if the client is already registered
         c.reconnect_with_server()
-        
-
+    
     print("Commands:")
-    print("  register           - Run the full registration flow if not registered")
-    print("  fetch_keys <id>    - Fetch keys for another client")
-    print("  send <id> <msg>    - Send a message")
-    print("  recv               - Retrieve and attempt to decrypt messages")
-    print("  quit               - Exit")
+    print("  register | r           - Run the full registration flow if not registered")
+    print("  fetch_keys | f <id>    - Fetch keys for another client")
+    print("  send | s <id> <msg>    - Send a message")
+    print("  recv | r               - Retrieve and attempt to decrypt messages")
+    print("  quit | exit | q | e    - Exit")
 
     try:
         while True:
@@ -563,10 +562,10 @@ def main():
                 continue
             cmd = cmd_line.split(" ", 2)
 
-            if cmd[0] == "quit":
+            if cmd[0] == "quit" or cmd[0] == "exit" or cmd[0] == "q" or cmd[0] == "e":
                 c._save_state()
                 break
-            elif cmd[0] == "register":
+            elif cmd[0] == "register" or cmd[0] == "r":
                 if c.registered:
                     print("Already registered.")
                 else:
@@ -575,17 +574,17 @@ def main():
                     c.register_ephemeral_exchange()
                     c.finalize_registration()
                     c._save_state()
-            elif cmd[0] == "fetch_keys":
+            elif cmd[0] == "fetch_keys" or cmd[0] == "f":
                 if len(cmd) < 2:
                     print("Usage: fetch_keys <target_id>")
                 else:
                     c.fetch_keys(cmd[1])
-            elif cmd[0] == "send":
+            elif cmd[0] == "send" or cmd[0] == "s":
                 if len(cmd) < 3:
                     print("Usage: send <target_id> <message>")
                 else:
                     c.send_message(cmd[1], cmd[2].encode('utf-8'))
-            elif cmd[0] == "recv":
+            elif cmd[0] == "recv" or cmd[0] == "r":
                 c.retrieve_messages()
             else:
                 print("Unknown command")
