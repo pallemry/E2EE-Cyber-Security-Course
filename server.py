@@ -29,6 +29,8 @@ stored_messages = {}
 client_otps = {}
 session_keys = {}  # {client_id: session_key for encryption after finalize_registration}
 post_ephemeral = {}  # {client_id: True/False}
+# near the other global variables:
+handed_out_prekeys = {}  # Maps (requester_id, target_id) -> {"index": int, "pre_key_hex": str}
 
 OTP_LIFETIME = 120  # OTP valid for 120 seconds (2 minutes)
 
@@ -230,7 +232,8 @@ def process_request(req, client_id):
                 "identity_pub": identity_pub,
                 "pre_keys": pre_keys,
                 "delivered_updates": [],
-                "signing_pub": client_signing_pub_key
+                "signing_pub": client_signing_pub_key,
+                "next_pre_key_idx": 0  # <-- start from the first available pre-key
             }
             if client_id in client_otps:
                 del client_otps[client_id]
@@ -248,20 +251,53 @@ def process_request(req, client_id):
     # Encrypted requests:
     if req_type == "FETCH_KEYS":
         target_id = req["target_id"]
+
+        # "client_id" is the requester A
         with data_lock:
             target_data = registered_clients.get(target_id)
-            if not target_data or not target_data["pre_keys"]:
-                return {"status":"error","error":"target_not_available_or_no_pre_keys"}, True
+            if not target_data:
+                return {"status":"error","error":"target_not_available"}, True
 
-            chosen_pre_key = target_data["pre_keys"].pop(0)
+            # If we've *already* handed out a prekey for (A, B), return it again
+            if (client_id, target_id) in handed_out_prekeys:
+                old_data = handed_out_prekeys[(client_id, target_id)]
+                chosen_index = old_data["index"]
+                chosen_pre_key_hex = old_data["pre_key_hex"]
+            else:
+                # Otherwise, pick the *next* available prekey from B.
+                chosen_index = target_data.get("next_pre_key_idx", 0)
+
+                # Check if we still have prekeys left
+                if chosen_index >= len(target_data["pre_keys"]):
+                    return {"status":"error","error":"no_more_pre_keys"}, True
+
+                chosen_pre_key = target_data["pre_keys"][chosen_index]
+                chosen_pre_key_hex = chosen_pre_key.public_bytes(
+                    Encoding.Raw, PublicFormat.Raw
+                ).hex()
+
+                # Optionally "pop" or set to None so it can't be reused for a *different* user
+                # target_data["pre_keys"][chosen_index] = None
+
+                # Remember we handed this key out to (A, B)
+                handed_out_prekeys[(client_id, target_id)] = {
+                    "index": chosen_index,
+                    "pre_key_hex": chosen_pre_key_hex
+                }
+
+                # Advance next_pre_key_idx for B for other requesters
+                target_data["next_pre_key_idx"] = chosen_index + 1
+
+            # B's identity key
             identity_pub = target_data["identity_pub"]
 
         return {
-            "status":"ok",
+            "status": "ok",
             "B_identity_pub": identity_pub.public_bytes(Encoding.Raw, PublicFormat.Raw).hex(),
-            "B_one_time_pub": chosen_pre_key.public_bytes(Encoding.Raw, PublicFormat.Raw).hex(),
-            "one_time_key_id":"0"
+            "B_one_time_pub": chosen_pre_key_hex,
+            "one_time_key_id": str(chosen_index)
         }, True
+
 
     elif req_type == "SEND_MESSAGE":
         recipient = req["recipient_id"]

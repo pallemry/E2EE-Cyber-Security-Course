@@ -334,6 +334,13 @@ class Client:
             self._save_state()
         else:
             print("Error finalizing registration:", resp)
+            
+    def register(self):
+        self.request_otp()
+        self.fetch_server_key()
+        self.register_ephemeral_exchange()
+        self.finalize_registration()
+        self._save_state()
 
     def fetch_keys(self, target_id):
         req = {"type":"FETCH_KEYS","client_id":self.client_id,"target_id":target_id}
@@ -344,7 +351,8 @@ class Client:
             self.known_identities[target_id] = B_id_pub
             self.contact_pre_keys[target_id] = {
                 "B_identity_pub": B_id_pub_hex,
-                "B_one_time_pub": resp["B_one_time_pub"]
+                "B_one_time_pub": resp["B_one_time_pub"],
+                "B_one_time_key_id": resp["one_time_key_id"]  # store the index from server
             }
             print(f"[*] Keys for {target_id} fetched and stored.")
             self._save_state()
@@ -395,7 +403,7 @@ class Client:
             "sender_id": self.client_id,
             "recipient_id": recipient_id,
             "A_ephemeral_pub": A_msg_eph_pub.public_bytes(Encoding.Raw, PublicFormat.Raw).hex(),
-            "B_one_time_key_id": "0",
+            "B_one_time_key_id": self.contact_pre_keys[recipient_id]["B_one_time_key_id"],
             "iv": iv.hex(),
             "ciphertext": ciphertext.hex()
         }
@@ -453,7 +461,8 @@ class Client:
         if not self.pre_keys_private:
             print("Error: No pre-keys available for decryption.")
             return False
-        B_one_time_priv = self.pre_keys_private[0]
+        idx = int(msg["B_one_time_key_id"]) 
+        B_one_time_priv = self.pre_keys_private[idx]  # pick the correct private prekey
 
         try:
             dh1 = self.identity_private.exchange(sender_identity_pub)
@@ -556,8 +565,10 @@ def main():
     print("  quit | exit | q | e    - Exit")
 
     try:
+        if not c.registered:
+            c.register()
         while True:
-            cmd_line = input("> ").strip()
+            cmd_line = input(f"({client_id})> ").strip()
             if not cmd_line:
                 continue
             cmd = cmd_line.split(" ", 2)
@@ -569,11 +580,7 @@ def main():
                 if c.registered:
                     print("Already registered.")
                 else:
-                    c.request_otp()
-                    c.fetch_server_key()
-                    c.register_ephemeral_exchange()
-                    c.finalize_registration()
-                    c._save_state()
+                    c.register()
             elif cmd[0] == "fetch_keys" or cmd[0] == "f":
                 if len(cmd) < 2:
                     print("Usage: fetch_keys <target_id>")

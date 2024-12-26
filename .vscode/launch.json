@@ -16,7 +16,7 @@
             "program": "${workspaceFolder}/client.py",
             "console": "integratedTerminal",
             "args": [
-                "+972111222333"
+                "+11111111"
             ]
         },
         {
@@ -26,7 +26,24 @@
             "program": "${workspaceFolder}/client.py",
             "console": "integratedTerminal",
             "args": [
-                "+972112233445"
+                "+22222222"
+            ]
+        },
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Launch Client 3",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/client.py",
+            "console": "integratedTerminal",
+            "args": [
+                "+33333333"
             ]
         },
         {
@@ -43,7 +60,8 @@
             "configurations": [
                 "Launch Server",
                 "Launch Client 1",
-                "Launch Client 2"
+                "Launch Client 2",
+                "Launch Client 3"
             ],
             "preLaunchTask": "closeTerminals"
         }
