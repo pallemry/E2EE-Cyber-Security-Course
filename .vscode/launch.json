@@ -16,7 +16,7 @@
             "program": "${workspaceFolder}/client.py",
             "console": "integratedTerminal",
             "args": [
-                "1"
+                "+972111222333"
             ]
         },
         {
@@ -26,7 +26,7 @@
             "program": "${workspaceFolder}/client.py",
             "console": "integratedTerminal",
             "args": [
-                "2"
+                "+972112233445"
             ]
         },
         {

@@ -12,7 +12,6 @@ from cryptography.hazmat.primitives.asymmetric import x25519, ed25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 HOST = '127.0.0.1'
 PORT = 5000
@@ -275,7 +274,7 @@ def process_request(req, client_id):
     else:
         return {"status":"error","error":"unknown_request"}, False
 
-def handle_client_connection(client_socket, client_address):
+def handle_client_connection(client_socket: socket.socket, client_address):
     print(f"[+] New connection from {client_address}")
     client_id = None
     # client_id known after first request that includes client_id.
@@ -306,6 +305,11 @@ def handle_client_connection(client_socket, client_address):
                 # Once known, store it
                 if client_id is None:
                     client_id = req["client_id"]
+                    if not is_valid_phone_number(client_id):
+                        print(f"Invalid phone number {client_address}: {client_id}")
+                        send_plain_msg(client_socket, {"status": "error", "error": "Invalid phone number"})
+                        client_id = None
+                        continue
 
             response, encrypt_response = process_request(req, client_id)
 

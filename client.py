@@ -514,12 +514,21 @@ class Client:
 
 def main():
     if len(sys.argv) < 2:
-        client_id = input("Enter your phone number (client_id): ").strip()
+        client_id = None
+        while client_id is None:
+            entered_id = input("Enter your phone number (client_id) in the format +123456789: ").strip()
+            if is_valid_phone_number(entered_id):
+                client_id = entered_id
+            else:
+                print("Invalid phone number. Please try again.")
     else:
         client_id = sys.argv[1]
+        if not is_valid_phone_number(client_id):
+            print("Error: Invalid phone number provided via command line.")
+            sys.exit(1)
 
     c = Client(client_id)
-    
+
     if c.registered:
         print("Client already registered, making connection with server")
         # mechanishm to reconnect with server, if the client is already registered

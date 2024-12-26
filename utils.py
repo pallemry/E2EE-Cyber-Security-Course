@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import socket
 from cryptography.hazmat.primitives.asymmetric import x25519, ed25519
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -109,3 +110,14 @@ def recv_encrypted_msg(sock, session_key, expected_signing_pub=None):
         expected_signing_pub.verify(signature, json.dumps(payload).encode('utf-8'))
 
     return payload
+
+def is_valid_phone_number(phone_number: str) -> bool:
+    """
+    Validates a phone number format. It must:
+    - Start with '+'
+    - Be followed by 8 to 15 digits
+    :param phone_number: The phone number to validate
+    :return: True if valid, False otherwise
+    """
+    pattern = r"^\+\d{8,15}$"
+    return bool(re.match(pattern, phone_number))
