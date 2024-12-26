@@ -85,31 +85,39 @@ def send_encrypted_msg(sock: socket.socket, msg, session_key, signing_private_ke
     sock.send(len(encoded).to_bytes(4, 'big') + encoded)
 
 def recv_encrypted_msg(sock, session_key, expected_signing_pub=None):
-    length_bytes = sock.recv(4)
-    if not length_bytes:
+    enc_msg = None
+    try:
+        length_bytes = sock.recv(4)
+        if not length_bytes:
+            return None
+        msg_len = int.from_bytes(length_bytes, 'big')
+        data = sock.recv(msg_len)
+        if not data:
+            return None
+
+        enc_msg = json.loads(data.decode('utf-8'))
+        iv = bytes.fromhex(enc_msg["iv"])
+        ciphertext = bytes.fromhex(enc_msg["ciphertext"])
+
+        aesgcm = AESGCM(session_key)
+        final_plaintext = aesgcm.decrypt(iv, ciphertext, None)
+        to_decrypt = json.loads(final_plaintext.decode('utf-8'))
+
+        payload = to_decrypt["payload"]
+        signature_hex = to_decrypt.get("signature")
+
+        # If we have a signing public key expected and a signature present, verify it
+        if expected_signing_pub is not None and signature_hex is not None:
+            signature = bytes.fromhex(signature_hex)
+            expected_signing_pub.verify(signature, json.dumps(payload).encode('utf-8'))
+
+        return payload
+    except Exception as e:
+        # print error along with enc_msg if possible
+        print(f"Error: {e}")
+        if enc_msg is not None:
+            print(f"Message: {enc_msg}")
         return None
-    msg_len = int.from_bytes(length_bytes, 'big')
-    data = sock.recv(msg_len)
-    if not data:
-        return None
-
-    enc_msg = json.loads(data.decode('utf-8'))
-    iv = bytes.fromhex(enc_msg["iv"])
-    ciphertext = bytes.fromhex(enc_msg["ciphertext"])
-
-    aesgcm = AESGCM(session_key)
-    final_plaintext = aesgcm.decrypt(iv, ciphertext, None)
-    to_decrypt = json.loads(final_plaintext.decode('utf-8'))
-
-    payload = to_decrypt["payload"]
-    signature_hex = to_decrypt.get("signature")
-
-    # If we have a signing public key expected and a signature present, verify it
-    if expected_signing_pub is not None and signature_hex is not None:
-        signature = bytes.fromhex(signature_hex)
-        expected_signing_pub.verify(signature, json.dumps(payload).encode('utf-8'))
-
-    return payload
 
 def is_valid_phone_number(phone_number: str) -> bool:
     """

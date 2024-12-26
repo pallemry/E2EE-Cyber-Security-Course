@@ -70,17 +70,48 @@ def process_request(req, client_id):
     # REQUEST_OTP, FETCH_SERVER_KEY, REGISTER, FINALIZE_REGISTRATION
     # After that, requests should be encrypted if session_key exists.
     if req_type == "RECONNECT":
+        client_id = req.get("client_id")
+        timestamp = req.get("timestamp")
+        signature = req.get("signature")
+
         if client_id not in registered_clients:
             return {"status": "error", "error": "Unknown client ID"}, False
 
-        # Generate a challenge (random string or nonce)
-        challenge = os.urandom(16).hex()
-        with data_lock:
-            registered_clients[client_id]["challenge"] = challenge
+        # Validate timestamp (e.g., within 5 minutes)
+        current_time = int(time.time())
+        if abs(current_time - int(timestamp)) > 300:
+            return {"status": "error", "error": "Timestamp expired or invalid"}, False
 
-        print(f"Generated challenge for {client_id}")
-        return {"type": "CHALLENGE", "challenge": challenge}, False
-    
+        # Validate the signature
+        expected_signing_pub = registered_clients[client_id]["signing_pub"]
+        try:
+            if expected_signing_pub:
+                # Verify with Ed25519 signature
+                expected_signing_pub.verify(
+                    bytes.fromhex(signature),
+                    f"{client_id}|{timestamp}".encode('utf-8')
+                )
+            else:
+                # Fallback: Verify with HMAC and session key
+                if client_id not in session_keys:
+                    return {"status": "error", "error": "No session key available"}, False
+
+                expected_hmac = hmac.new(session_keys[client_id], f"{client_id}|{timestamp}".encode('utf-8'), hashlib.sha256).hexdigest()
+                if signature != expected_hmac:
+                    raise ValueError("Invalid HMAC signature")
+
+            # Signature is valid, generate challenge
+            challenge = os.urandom(16).hex()
+            with data_lock:
+                registered_clients[client_id]["challenge"] = challenge
+
+            print(f"Generated challenge for {client_id}")
+            return {"type": "CHALLENGE", "challenge": challenge}, True
+
+        except Exception as e:
+            print(f"Failed signature verification for {client_id}: {e}")
+            return {"status": "error", "error": "Signature verification failed"}, False
+        
     elif req_type == "CHALLENGE_RESPONSE":
         if client_id not in registered_clients:
             return {"status": "error", "error": "Unknown client ID"}, False

@@ -4,6 +4,7 @@ import os
 import sys
 import hmac
 import hashlib
+import time
 from utils import *
 from cryptography.hazmat.primitives.asymmetric import x25519, ed25519
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -471,19 +472,32 @@ class Client:
             return False
 
     def reconnect_with_server(self):
-        if not self.registered:
+        if not self.registered or not self.session_key:
             print("Client is not registered. Please register first.")
             return
 
-        # Send a reconnection request
+        # Generate a timestamp for validation and replay protection
+        timestamp = str(int(time.time()))
+
+        # Generate the signature for client_id and timestamp
+        if self.client_signing_private_key:
+            signature = self.client_signing_private_key.sign(f"{self.client_id}|{timestamp}".encode('utf-8')).hex()
+        else:
+            # Fallback to HMAC using the session key
+            signature = hmac.new(self.session_key, f"{self.client_id}|{timestamp}".encode('utf-8'), hashlib.sha256).hexdigest()
+
+        # Send a reconnection request with signature and timestamp
         req = {
             "type": "RECONNECT",
-            "client_id": self.client_id
+            "client_id": self.client_id,
+            "timestamp": timestamp,
+            "signature": signature
         }
+
         send_plain_msg(self.sock, req)
 
         # Expect a challenge from the server
-        resp = recv_plain_msg(self.sock)
+        resp = recv_encrypted_msg(self.sock, self.session_key, self.server_signing_public_key)
         if resp and resp.get("type") == "CHALLENGE" and self.session_key:
             challenge = resp["challenge"]
             print("Received challenge from server.")
@@ -501,9 +515,9 @@ class Client:
                 "client_id": self.client_id,
                 "challenge_response": challenge_response
             }
-            
+
             final_resp = self._send_request(response)
-            
+
             if final_resp and final_resp.get("status") == "ok":
                 print("Reconnection successful.")
             else:
